@@ -1,0 +1,30 @@
+[tool.poetry]
+name = "ttm-test"
+version = "0.1.0"
+description = "Python app to run experiments with talkingtomachines framework"
+authors = ["Nico <nico@example.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.10"
+talkingtomachines = {version = "*", source = "testpypi"}
+python-dotenv = "*"
+openpyxl = "*"
+psutil = "*"
+streamlit = "^1.51.0"
+pandas = "^2.3.3"
+openai = "*"
+
+[tool.poetry.group.dev.dependencies]
+
+
+[[tool.poetry.source]]
+name = "testpypi"
+url = "https://test.pypi.org/simple/"
+priority = "supplemental"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
