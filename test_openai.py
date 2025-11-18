@@ -4,18 +4,15 @@ Script di test per verificare la connessione con OpenAI API.
 Carica la chiave API dal file .env e esegue una chiamata di test.
 """
 
-import os
-from dotenv import load_dotenv
+from secrets_helper import get_secret
 from openai import OpenAI
 
 
 def test_openai_connection():
     """Testa la connessione con OpenAI API."""
-    # Carica le variabili d'ambiente dal file .env
-    load_dotenv()
-    
-    # Ottieni la chiave API
-    api_key = os.getenv('OPENAI_API_KEY')
+    # Ottieni la chiave API (da st.secrets su Cloud o da .env in locale)
+    # load_dotenv() viene chiamato automaticamente nel modulo secrets_helper
+    api_key = get_secret('OPENAI_API_KEY')
     
     if not api_key:
         print("❌ Errore: OPENAI_API_KEY non trovata nel file .env")

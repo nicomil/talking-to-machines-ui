@@ -12,19 +12,9 @@ import time
 from pathlib import Path
 from datetime import datetime
 
-# Load environment variables from .env file if it exists
-try:
-    from dotenv import load_dotenv
-    env_path = Path(__file__).parent / '.env'
-    print(f"Loading environment variables from {env_path}")
-    if env_path.exists():
-        load_dotenv(env_path)
-    else:
-        # Also try current directory
-        load_dotenv()
-except ImportError:
-    # python-dotenv not installed, use only environment variables
-    pass
+# Importa secrets_helper per gestire secrets in modo compatibile con Streamlit Cloud e locale
+# load_dotenv() viene chiamato automaticamente nel modulo secrets_helper
+from secrets_helper import get_secret
 
 # Try to import the Python package directly
 try:
@@ -37,9 +27,9 @@ except ImportError:
 def check_api_keys():
     """Check that API keys are configured."""
     required_keys = {
-        'OPENAI_API_KEY': os.getenv('OPENAI_API_KEY'),
-        'HF_API_KEY': os.getenv('HF_API_KEY'),
-        'OPENROUTER_API_KEY': os.getenv('OPENROUTER_API_KEY')
+        'OPENAI_API_KEY': get_secret('OPENAI_API_KEY'),
+        'HF_API_KEY': get_secret('HF_API_KEY'),
+        'OPENROUTER_API_KEY': get_secret('OPENROUTER_API_KEY')
     }
     print(required_keys)
     

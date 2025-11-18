@@ -15,6 +15,10 @@ from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
 
+# Importa secrets_helper per caricare .env in locale (load_dotenv viene chiamato nel modulo)
+# e rendere disponibile get_secret() per eventuali utilizzi futuri
+from secrets_helper import get_secret
+
 # Configurazione pagina
 st.set_page_config(
     page_title="TTM Experiments Manager",
