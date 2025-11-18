@@ -6,11 +6,14 @@ Interfaccia completa con gestione template, esecuzione esperimenti e monitoraggi
 
 import streamlit as st
 import os
+import sys
+import platform
 import subprocess
 import threading
 import time
 import json
 import pandas as pd
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Optional, Dict, List
@@ -122,6 +125,12 @@ st.markdown("""
 }
 [data-testid="stSidebar"] .stRadio > div > label:nth-of-type(4)::before {
     content: "bar_chart";
+    font-family: 'Material Icons';
+    margin-right: 8px;
+    display: inline-block;
+}
+[data-testid="stSidebar"] .stRadio > div > label:nth-of-type(5)::before {
+    content: "settings";
     font-family: 'Material Icons';
     margin-right: 8px;
     display: inline-block;
@@ -332,38 +341,85 @@ def get_template_files() -> List[Path]:
 
 
 def get_result_files() -> List[Path]:
-    """Ottiene la lista dei file di risultati."""
+    """Ottiene la lista dei file di risultati, cercando anche nelle sottocartelle."""
     results = []
     if RESULTS_DIR.exists():
-        results = list(RESULTS_DIR.glob("*.json")) + list(RESULTS_DIR.glob("*.csv"))
+        # Cerca file nella root (per retrocompatibilità)
+        results.extend(list(RESULTS_DIR.glob("*.json")) + list(RESULTS_DIR.glob("*.csv")))
+        # Cerca file nelle sottocartelle
+        for subdir in RESULTS_DIR.iterdir():
+            if subdir.is_dir():
+                results.extend(list(subdir.glob("*.json")) + list(subdir.glob("*.csv")))
     return sorted(results, key=lambda x: x.stat().st_mtime, reverse=True)
 
 def organize_results_by_experiment() -> Dict[str, Dict[str, Path]]:
-    """Organizza i risultati per esperimento, raggruppando CSV e JSON."""
-    results = get_result_files()
+    """Organizza i risultati per esperimento, raggruppando CSV e JSON per cartella."""
     experiments = {}
     
-    for result_file in results:
-        # Estrai il nome base senza estensione
-        base_name = result_file.stem
-        
+    if not RESULTS_DIR.exists():
+        return experiments
+    
+    # Cerca nelle sottocartelle (nuova struttura)
+    for subdir in RESULTS_DIR.iterdir():
+        if subdir.is_dir():
+            csv_files = list(subdir.glob("*.csv"))
+            json_files = list(subdir.glob("*.json"))
+            
+            if csv_files or json_files:
+                # Usa il nome della cartella come chiave esperimento
+                exp_name = subdir.name
+                
+                # Trova il timestamp più recente tra i file
+                all_files = csv_files + json_files
+                max_timestamp = max(f.stat().st_mtime for f in all_files) if all_files else subdir.stat().st_mtime
+                
+                experiments[exp_name] = {
+                    'csv': csv_files[0] if csv_files else None,
+                    'json': json_files[0] if json_files else None,
+                    'timestamp': max_timestamp,
+                    'folder': subdir,
+                    'all_csv': csv_files,
+                    'all_json': json_files
+                }
+    
+    # Per retrocompatibilità: cerca anche file nella root
+    root_csv = list(RESULTS_DIR.glob("*.csv"))
+    root_json = list(RESULTS_DIR.glob("*.json"))
+    
+    for csv_file in root_csv:
+        base_name = csv_file.stem
+        if base_name not in experiments:
+            experiments[base_name] = {
+                'csv': csv_file,
+                'json': None,
+                'timestamp': csv_file.stat().st_mtime,
+                'folder': None,
+                'all_csv': [csv_file],
+                'all_json': []
+            }
+        else:
+            # Se esiste già, aggiungi alla lista
+            if csv_file not in experiments[base_name]['all_csv']:
+                experiments[base_name]['all_csv'].append(csv_file)
+    
+    for json_file in root_json:
+        base_name = json_file.stem
         if base_name not in experiments:
             experiments[base_name] = {
                 'csv': None,
-                'json': None,
-                'timestamp': result_file.stat().st_mtime
+                'json': json_file,
+                'timestamp': json_file.stat().st_mtime,
+                'folder': None,
+                'all_csv': [],
+                'all_json': [json_file]
             }
-        
-        # Assegna il file al tipo corretto
-        if result_file.suffix == '.csv':
-            experiments[base_name]['csv'] = result_file
-        elif result_file.suffix == '.json':
-            experiments[base_name]['json'] = result_file
-        
-        # Aggiorna il timestamp se più recente
-        file_mtime = result_file.stat().st_mtime
-        if file_mtime > experiments[base_name]['timestamp']:
-            experiments[base_name]['timestamp'] = file_mtime
+        else:
+            # Se esiste già, aggiungi alla lista
+            if json_file not in experiments[base_name]['all_json']:
+                experiments[base_name]['all_json'].append(json_file)
+            # Aggiorna il file principale se non c'è
+            if experiments[base_name]['json'] is None:
+                experiments[base_name]['json'] = json_file
     
     # Ordina per timestamp (più recenti prima)
     return dict(sorted(experiments.items(), key=lambda x: x[1]['timestamp'], reverse=True))
@@ -373,6 +429,23 @@ def run_experiment_async(template_path: str, mode: str, experiment_id: str):
     """Esegue un esperimento in modo asincrono."""
     start_time = time.time()
     process = None
+    
+    # Crea una cartella per i risultati di questo esperimento
+    # Nome formato: nome_template_timestamp
+    template_name = Path(template_path).stem
+    timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+    experiment_folder_name = f"{template_name}_{timestamp_str}"
+    experiment_folder = RESULTS_DIR / experiment_folder_name
+    experiment_folder.mkdir(exist_ok=True)
+    
+    # Traccia i file esistenti prima dell'esecuzione per spostare solo quelli nuovi
+    existing_files_before = set()
+    if RESULTS_DIR.exists():
+        existing_files_before = {
+            f.name for f in RESULTS_DIR.iterdir() 
+            if f.is_file() and f.suffix in ['.csv', '.json']
+        }
+    
     try:
         process = subprocess.Popen(
             ['talkingtomachines', template_path],
@@ -387,13 +460,14 @@ def run_experiment_async(template_path: str, mode: str, experiment_id: str):
         process.stdin.flush()
         process.stdin.close()
         
-        # Salva il PID e il template path nello stato
+        # Salva il PID, il template path e la cartella risultati nello stato
         update_experiment_state(experiment_id, {
             'status': 'running',
             'start_time': start_time,
             'elapsed': 0,
             'process_pid': process.pid,
             'template': template_path,
+            'result_folder': str(experiment_folder),
             'process_info': None,
             'result_files_count': 0,
             'stdout': '',
@@ -484,7 +558,39 @@ def run_experiment_async(template_path: str, mode: str, experiment_id: str):
             
             elapsed = time.time() - start_time
             
+            # Sposta i file generati nella cartella dell'esperimento
+            # Sposta solo i file nuovi (non esistenti prima dell'esecuzione)
+            files_moved = []
+            if RESULTS_DIR.exists():
+                # Cerca file CSV e JSON nella root di RESULTS_DIR
+                for result_file in RESULTS_DIR.glob("*.csv"):
+                    if (result_file.is_file() and 
+                        result_file.parent == RESULTS_DIR and 
+                        result_file.name not in existing_files_before):
+                        try:
+                            dest = experiment_folder / result_file.name
+                            shutil.move(str(result_file), str(dest))
+                            files_moved.append(dest.name)
+                        except Exception as e:
+                            # Se il file è già stato spostato o c'è un errore, continua
+                            pass
+                
+                for result_file in RESULTS_DIR.glob("*.json"):
+                    if (result_file.is_file() and 
+                        result_file.parent == RESULTS_DIR and 
+                        result_file.name not in existing_files_before):
+                        try:
+                            dest = experiment_folder / result_file.name
+                            shutil.move(str(result_file), str(dest))
+                            files_moved.append(dest.name)
+                        except Exception as e:
+                            # Se il file è già stato spostato o c'è un errore, continua
+                            pass
+            
             final_status = 'stopped' if exp_state and exp_state.get('status') == 'stopped' else ('completed' if return_code == 0 else 'failed')
+            
+            # Conta i file nella cartella dell'esperimento
+            result_files_in_folder = list(experiment_folder.glob("*.csv")) + list(experiment_folder.glob("*.json"))
             
             update_experiment_state(experiment_id, {
                 'status': final_status,
@@ -492,7 +598,9 @@ def run_experiment_async(template_path: str, mode: str, experiment_id: str):
                 'elapsed': elapsed,
                 'process_info': None,
                 'process_pid': None,
-                'result_files_count': len(get_result_files()),
+                'result_folder': str(experiment_folder),
+                'result_files_count': len(result_files_in_folder),
+                'files_moved': files_moved,
                 'stdout': ''.join(stdout_lines),
                 'stderr': ''.join(stderr_lines),
                 'return_code': return_code
@@ -504,7 +612,8 @@ def run_experiment_async(template_path: str, mode: str, experiment_id: str):
             'error': str(e),
             'start_time': start_time,
             'elapsed': time.time() - start_time,
-            'process_pid': None
+            'process_pid': None,
+            'result_folder': str(experiment_folder) if 'experiment_folder' in locals() else None
         })
 
 
@@ -540,7 +649,8 @@ with st.sidebar:
         "Dashboard": "dashboard",
         "Templates": "folder",
         "Run Experiment": "play_arrow",
-        "Results": "bar_chart"
+        "Results": "bar_chart",
+        "System Status": "settings"
     }
     
     # Crea opzioni di navigazione con icone
@@ -559,8 +669,12 @@ with st.sidebar:
         label_visibility="collapsed"
     )
     
+    # Se la pagina selezionata è cambiata, aggiorna lo stato e fai rerun
+    if 'selected_page' not in st.session_state or st.session_state.selected_page != selected_page_name:
+        st.session_state.selected_page = selected_page_name
+        st.rerun()
+    
     page = selected_page_name
-    st.session_state.selected_page = page
 
 
 # Pagina Dashboard
@@ -570,7 +684,7 @@ if page == "Dashboard":
     col1, col2, col3, col4 = st.columns(4)
     
     templates = get_template_files()
-    results = get_result_files()
+    experiments = organize_results_by_experiment()
     experiments_state = get_all_experiments_state()
     running = len([e for e in experiments_state.values() if e.get('status') == 'running'])
     completed = len([e for e in st.session_state.experiment_history if e.get('status') == 'completed'])
@@ -578,7 +692,7 @@ if page == "Dashboard":
     with col1:
         st.metric("Templates", len(templates))
     with col2:
-        st.metric("Results", len(results))
+        st.metric("Experiments", len(experiments))
     with col3:
         st.metric("Running", running)
     with col4:
@@ -603,25 +717,30 @@ if page == "Dashboard":
                             else:
                                 st.error("Failed to stop experiment")
                     
-                    elapsed = exp_data.get('elapsed', 0)
-                    proc_info = exp_data.get('process_info')
-                    
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Elapsed Time", format_time(elapsed))
-                    if proc_info and isinstance(proc_info, dict):
-                        with col2:
-                            st.metric("CPU", f"{proc_info.get('cpu_percent', 0):.1f}%")
-                        with col3:
-                            st.metric("Memory", f"{proc_info.get('memory_mb', 0):.1f} MB")
-                    else:
-                        with col2:
-                            st.metric("CPU", "N/A")
-                        with col3:
-                            st.metric("Memory", "N/A")
-                    
-                    result_count = exp_data.get('result_files_count', 0)
-                    st.write(f"Result files: {result_count}")
+            elapsed = exp_data.get('elapsed', 0)
+            proc_info = exp_data.get('process_info')
+            result_folder = exp_data.get('result_folder')
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Elapsed Time", format_time(elapsed))
+            if proc_info and isinstance(proc_info, dict):
+                with col2:
+                    st.metric("CPU", f"{proc_info.get('cpu_percent', 0):.1f}%")
+                with col3:
+                    st.metric("Memory", f"{proc_info.get('memory_mb', 0):.1f} MB")
+            else:
+                with col2:
+                    st.metric("CPU", "N/A")
+                with col3:
+                    st.metric("Memory", "N/A")
+            
+            result_count = exp_data.get('result_files_count', 0)
+            if result_folder:
+                folder_name = Path(result_folder).name
+                st.write(f"Result folder: `{folder_name}` ({result_count} files)")
+            else:
+                st.write(f"Result files: {result_count}")
     
     # Cronologia esperimenti
     if st.session_state.experiment_history:
@@ -920,17 +1039,25 @@ elif page == "Results":
             csv_file = exp_data['csv']
             json_file = exp_data['json']
             timestamp = exp_data['timestamp']
+            folder = exp_data.get('folder')
+            all_csv = exp_data.get('all_csv', [])
+            all_json = exp_data.get('all_json', [])
             
             # Informazioni generali esperimento
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Experiment Name", selected_experiment)
             with col2:
-                files_count = sum([1 for f in [csv_file, json_file] if f is not None])
+                files_count = len(all_csv) + len(all_json)
                 st.metric("Files", files_count)
             with col3:
                 mtime_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
                 st.metric("Last Modified", mtime_str.split()[0])
+            with col4:
+                if folder:
+                    st.metric("Folder", folder.name)
+                else:
+                    st.metric("Location", "Root (legacy)")
             
             st.markdown("---")
             
@@ -1057,17 +1184,199 @@ elif page == "Results":
             with col_del2:
                 if st.button("Delete Experiment", key=f"del_exp_{selected_experiment}", type="secondary"):
                     try:
-                        deleted = []
-                        if csv_file:
-                            csv_file.unlink()
-                            deleted.append("CSV")
-                        if json_file:
-                            json_file.unlink()
-                            deleted.append("JSON")
-                        st.success(f"Experiment deleted ({', '.join(deleted)} files removed)")
+                        deleted_count = 0
+                        if folder and folder.exists():
+                            # Elimina l'intera cartella
+                            for file in folder.iterdir():
+                                if file.is_file():
+                                    file.unlink()
+                                    deleted_count += 1
+                            # Rimuovi la cartella se è vuota
+                            try:
+                                folder.rmdir()
+                            except OSError:
+                                pass  # Cartella non vuota o errore
+                            st.success(f"Experiment folder deleted ({deleted_count} files removed)")
+                        else:
+                            # Elimina i file nella root (retrocompatibilità)
+                            deleted = []
+                            for csv_f in all_csv:
+                                csv_f.unlink()
+                                deleted.append("CSV")
+                            for json_f in all_json:
+                                json_f.unlink()
+                                deleted.append("JSON")
+                            st.success(f"Experiment deleted ({', '.join(deleted)} files removed)")
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error deleting experiment: {str(e)}")
+
+
+# Pagina System Status
+elif page == "System Status":
+    st.title("System Status")
+    
+    # Informazioni ambiente
+    st.subheader("Environment Information")
+    col_env1, col_env2 = st.columns(2)
+    
+    with col_env1:
+        # Rileva se siamo su Streamlit Cloud o locale
+        is_cloud = False
+        try:
+            if hasattr(st, "secrets") and st.secrets is not None:
+                # Prova a verificare se st.secrets contiene dati (indicatore di Cloud)
+                try:
+                    # Se st.secrets è accessibile e non è vuoto, probabilmente siamo su Cloud
+                    if hasattr(st.secrets, "get"):
+                        # Prova ad accedere a una chiave comune
+                        _ = st.secrets.get("OPENAI_API_KEY", None)
+                        is_cloud = True
+                    elif isinstance(st.secrets, dict) and len(st.secrets) > 0:
+                        is_cloud = True
+                except (AttributeError, TypeError, KeyError):
+                    pass
+        except Exception:
+            pass
+        
+        env_type = "🌐 Streamlit Cloud" if is_cloud else "💻 Local"
+        st.metric("Environment", env_type)
+    
+    with col_env2:
+        st.metric("Python Version", f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}")
+    
+    # Informazioni sistema
+    st.markdown("---")
+    st.subheader("System Information")
+    
+    col_sys1, col_sys2, col_sys3 = st.columns(3)
+    with col_sys1:
+        st.write(f"**OS:** {platform.system()} {platform.release()}")
+    with col_sys2:
+        st.write(f"**Architecture:** {platform.machine()}")
+    with col_sys3:
+        st.write(f"**Streamlit:** {st.__version__}")
+    
+    # Credenziali caricate
+    st.markdown("---")
+    st.subheader("API Keys Status")
+    
+    api_keys = {
+        'OPENAI_API_KEY': get_secret('OPENAI_API_KEY'),
+        'HF_API_KEY': get_secret('HF_API_KEY'),
+        'OPENROUTER_API_KEY': get_secret('OPENROUTER_API_KEY')
+    }
+    
+    def mask_key(key: Optional[str]) -> str:
+        """Maschera una chiave API mostrando solo i primi e ultimi caratteri."""
+        if not key:
+            return "❌ Not configured"
+        if len(key) <= 10:
+            return "⚠️ Invalid (too short)"
+        return f"✅ {key[:8]}...{key[-6:]}"
+    
+    for key_name, key_value in api_keys.items():
+        col_key1, col_key2 = st.columns([2, 3])
+        with col_key1:
+            st.write(f"**{key_name}:**")
+        with col_key2:
+            st.write(mask_key(key_value))
+    
+    # Informazioni directory
+    st.markdown("---")
+    st.subheader("Directory Status")
+    
+    directories_info = [
+        ("Templates Directory", TEMPLATES_DIR),
+        ("Results Directory", RESULTS_DIR),
+        ("State File", EXPERIMENTS_STATE_FILE),
+    ]
+    
+    for dir_name, dir_path in directories_info:
+        col_dir1, col_dir2, col_dir3 = st.columns([2, 2, 2])
+        with col_dir1:
+            st.write(f"**{dir_name}:**")
+        with col_dir2:
+            exists = dir_path.exists() if isinstance(dir_path, Path) else os.path.exists(dir_path)
+            status = "✅ Exists" if exists else "❌ Not found"
+            st.write(status)
+        with col_dir3:
+            if exists:
+                if isinstance(dir_path, Path) and dir_path.is_dir():
+                    file_count = len(list(dir_path.glob("*"))) if dir_path.exists() else 0
+                    st.write(f"({file_count} items)")
+                elif isinstance(dir_path, Path) and dir_path.is_file():
+                    size = dir_path.stat().st_size / 1024
+                    st.write(f"({size:.2f} KB)")
+                else:
+                    st.write("")
+            else:
+                st.write("")
+    
+    # Statistiche file
+    st.markdown("---")
+    st.subheader("File Statistics")
+    
+    col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+    
+    templates = get_template_files()
+    experiments = organize_results_by_experiment()
+    experiments_state = get_all_experiments_state()
+    running = len([e for e in experiments_state.values() if e.get('status') == 'running'])
+    
+    with col_stat1:
+        st.metric("Templates", len(templates))
+    with col_stat2:
+        st.metric("Experiment Folders", len(experiments))
+    with col_stat3:
+        st.metric("Running Experiments", running)
+    with col_stat4:
+        total_experiments = len(experiments_state)
+        st.metric("Total Experiments", total_experiments)
+    
+    # Informazioni aggiuntive
+    st.markdown("---")
+    st.subheader("Additional Information")
+    
+    with st.expander("Python Environment Details"):
+        st.code(f"""
+Python Version: {sys.version}
+Platform: {platform.platform()}
+Executable: {sys.executable}
+""", language="text")
+    
+    with st.expander("Secrets Source"):
+        secrets_source_info = []
+        for key_name in ['OPENAI_API_KEY', 'HF_API_KEY', 'OPENROUTER_API_KEY']:
+            key_value = get_secret(key_name)
+            if key_value:
+                # Prova a capire da dove viene
+                source = "Unknown"
+                try:
+                    if hasattr(st, "secrets") and st.secrets is not None:
+                        try:
+                            if hasattr(st.secrets, "get"):
+                                if st.secrets.get(key_name) is not None:
+                                    source = "st.secrets (Cloud)"
+                            elif isinstance(st.secrets, dict) and key_name in st.secrets:
+                                source = "st.secrets (Cloud)"
+                        except (AttributeError, TypeError, KeyError):
+                            pass
+                except Exception:
+                    pass
+                
+                if source == "Unknown":
+                    # Controlla se è nelle env vars
+                    if os.getenv(key_name):
+                        source = "Environment Variable (.env)"
+                    else:
+                        source = "Environment Variable (system)"
+                
+                secrets_source_info.append(f"**{key_name}:** {source}")
+            else:
+                secrets_source_info.append(f"**{key_name}:** ❌ Not configured")
+        
+        st.markdown("\n".join(secrets_source_info))
 
 
 if __name__ == "__main__":
