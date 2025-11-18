@@ -401,6 +401,10 @@ def organize_results_by_experiment() -> Dict[str, Dict[str, Path]]:
             # Se esiste già, aggiungi alla lista
             if csv_file not in experiments[base_name]['all_csv']:
                 experiments[base_name]['all_csv'].append(csv_file)
+                # Aggiorna il timestamp se il nuovo file è più recente
+                csv_mtime = csv_file.stat().st_mtime
+                if csv_mtime > experiments[base_name]['timestamp']:
+                    experiments[base_name]['timestamp'] = csv_mtime
     
     for json_file in root_json:
         base_name = json_file.stem
@@ -417,6 +421,10 @@ def organize_results_by_experiment() -> Dict[str, Dict[str, Path]]:
             # Se esiste già, aggiungi alla lista
             if json_file not in experiments[base_name]['all_json']:
                 experiments[base_name]['all_json'].append(json_file)
+                # Aggiorna il timestamp se il nuovo file è più recente
+                json_mtime = json_file.stat().st_mtime
+                if json_mtime > experiments[base_name]['timestamp']:
+                    experiments[base_name]['timestamp'] = json_mtime
             # Aggiorna il file principale se non c'è
             if experiments[base_name]['json'] is None:
                 experiments[base_name]['json'] = json_file
@@ -717,30 +725,30 @@ if page == "Dashboard":
                             else:
                                 st.error("Failed to stop experiment")
                     
-            elapsed = exp_data.get('elapsed', 0)
-            proc_info = exp_data.get('process_info')
-            result_folder = exp_data.get('result_folder')
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Elapsed Time", format_time(elapsed))
-            if proc_info and isinstance(proc_info, dict):
-                with col2:
-                    st.metric("CPU", f"{proc_info.get('cpu_percent', 0):.1f}%")
-                with col3:
-                    st.metric("Memory", f"{proc_info.get('memory_mb', 0):.1f} MB")
-            else:
-                with col2:
-                    st.metric("CPU", "N/A")
-                with col3:
-                    st.metric("Memory", "N/A")
-            
-            result_count = exp_data.get('result_files_count', 0)
-            if result_folder:
-                folder_name = Path(result_folder).name
-                st.write(f"Result folder: `{folder_name}` ({result_count} files)")
-            else:
-                st.write(f"Result files: {result_count}")
+                    elapsed = exp_data.get('elapsed', 0)
+                    proc_info = exp_data.get('process_info')
+                    result_folder = exp_data.get('result_folder')
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Elapsed Time", format_time(elapsed))
+                    if proc_info and isinstance(proc_info, dict):
+                        with col2:
+                            st.metric("CPU", f"{proc_info.get('cpu_percent', 0):.1f}%")
+                        with col3:
+                            st.metric("Memory", f"{proc_info.get('memory_mb', 0):.1f} MB")
+                    else:
+                        with col2:
+                            st.metric("CPU", "N/A")
+                        with col3:
+                            st.metric("Memory", "N/A")
+                    
+                    result_count = exp_data.get('result_files_count', 0)
+                    if result_folder:
+                        folder_name = Path(result_folder).name
+                        st.write(f"Result folder: `{folder_name}` ({result_count} files)")
+                    else:
+                        st.write(f"Result files: {result_count}")
     
     # Cronologia esperimenti
     if st.session_state.experiment_history:
